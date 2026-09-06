@@ -242,7 +242,7 @@ configure_droidspaces_non_gki() {
 }
 
 # ==========================================
-# KernelSU Setup & SUSFS v2.3.0 Adaptation
+# KernelSU Setup
 # ==========================================
 if [ "$ENABLE_KSU" -eq 1 ]; then
     echo "==========================================="
@@ -251,198 +251,6 @@ if [ "$ENABLE_KSU" -eq 1 ]; then
     echo "[*] Downloading and running ReSukiSU remote setup script..."
     curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
     echo "[+] KernelSU setup finished."
-
-    if [ -f include/linux/susfs.h ]; then
-        echo "=========================================================================="
-        echo " [*] Backporting official GKI SUSFS v2.3.0 onto Linux 4.19 i_state + hooks"
-        echo "=========================================================================="
-        
-        GKI_BASE='https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android12-5.10/kernel_patches'
-        mkdir -p "$KERNEL_DIR/.susfs23-upstream"
-        curl -fLSs "$GKI_BASE/fs/susfs.c" -o "$KERNEL_DIR/.susfs23-upstream/susfs.c"
-        curl -fLSs "$GKI_BASE/include/linux/susfs.h" -o "$KERNEL_DIR/.susfs23-upstream/susfs.h"
-        curl -fLSs "$GKI_BASE/include/linux/susfs_def.h" -o "$KERNEL_DIR/.susfs23-upstream/susfs_def.h"
-
-        # 1. Backport core SUSFS files to 4.19 format
-        python3 -u - <<'PY'
-from pathlib import Path
-import os
-
-ws = Path(os.environ.get('GITHUB_WORKSPACE', '.'))
-up = ws / '.susfs23-upstream'
-gki_c = (up / 'susfs.c').read_text()
-gki_h = (up / 'susfs.h').read_text()
-gki_d = (up / 'susfs_def.h').read_text()
-old_c = Path('fs/susfs.c').read_text()
-
-old_start = old_c.find('static SUSFS_DECL_FSNOTIFY_OPS(susfs_handle_sdcard_inode_event)')
-old_end = old_c.find('static int susfs_sdcard_monitor_fn')
-
-c = gki_c.replace('i_mapping->flags', 'i_state')
-d = gki_d.replace('inode->i_mapping->flags', 'inode->i_state').replace('i_mapping->flags', 'i_state')
-d = d.replace(
-    "inode->i_mapping->flags => A 'unsigned long' type storing flag 'AS_FLAGS_",
-    "inode->i_state => A 'unsigned long' type storing flag 'AS_FLAGS_",
-)
-
-if '#include <linux/version.h>' not in d:
-    if '#include <linux/bits.h>' in d:
-        d = d.replace('#include <linux/bits.h>', '#include <linux/bits.h>\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
-    else:
-        d = d.replace('#define KSU_SUSFS_DEF_H', '#define KSU_SUSFS_DEF_H\n\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
-
-if 'SUSFS_DECL_FSNOTIFY_OPS' not in d:
-    helper = r'''
-/* 4.19 / non-GKI fsnotify compatibility */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
-typedef const struct qstr *susfs_fname_t;
-#define susfs_fname_len(f) ((f)->len)
-#define susfs_fname_arg(f) ((f)->name)
-#else
-typedef const unsigned char *susfs_fname_t;
-#define susfs_fname_len(f) (strlen(f))
-#define susfs_fname_arg(f) (f)
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
-int name(struct fsnotify_mark *mark, u32 mask, struct inode *inode,    \
-struct inode *dir, const struct qstr *file_name, u32 cookie)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
-int name(struct fsnotify_group *group, struct inode *inode, u32 mask,  \
-const void *data, int data_type, susfs_fname_t file_name,       \
-u32 cookie, struct fsnotify_iter_info *iter_info)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
-int name(struct fsnotify_group *group, struct inode *inode,            \
-struct fsnotify_mark *inode_mark,                              \
-struct fsnotify_mark *vfsmount_mark, u32 mask,                 \
-const void *data, int data_type, susfs_fname_t file_name,       \
-u32 cookie, struct fsnotify_iter_info *iter_info)
-#else
-#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
-int name(struct fsnotify_group *group, struct inode *inode,            \
-struct fsnotify_mark *inode_mark,                              \
-struct fsnotify_mark *vfsmount_mark, u32 mask, void *data,    \
-int data_type, susfs_fname_t file_name, u32 cookie)
-#endif
-'''
-    d = d.replace('#endif // #ifndef KSU_SUSFS_DEF_H', helper + '\n#endif // #ifndef KSU_SUSFS_DEF_H')
-
-d = d.replace(
-    '''static inline bool susfs_is_current_proc_umounted_app(void) {
-    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
-            current_uid().val >= 10000);
-}''',
-    '''static inline bool susfs_is_current_proc_umounted_app(void) {
-    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-            __kuid_val(current_uid()) >= 10000);
-#else
-            current_uid().val >= 10000);
-#endif
-}'''
-)
-
-g_start = c.find('static int susfs_handle_sdcard_inode_event')
-g_end = c.find('static int susfs_sdcard_monitor_fn')
-if g_start >= 0 and g_end >= 0 and old_start >= 0 and old_end >= 0:
-    c = c[:g_start] + old_c[old_start:old_end] + c[g_end:]
-
-if 'int susfs_open_redirect_spoof_show_map_vma(' not in c:
-    wrap = '''
-#ifdef CONFIG_KSU_SUSFS
-int susfs_open_redirect_spoof_show_map_vma(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char *spoofed_name)
-{
-    char *name = NULL;
-    int ret;
-
-    if (!spoofed_name)
-        return 0;
-    ret = susfs_open_redirect_spoof_show_map_vma_srcu(inode, out_ino, out_dev, &name);
-    if (ret && name)
-        strscpy(spoofed_name, name, SUSFS_MAX_LEN_PATHNAME);
-    return ret;
-}
-#endif
-'''
-    c = c.replace('void susfs_start_sdcard_monitor_fn(void)', wrap + '\nvoid susfs_start_sdcard_monitor_fn(void)', 1)
-
-Path('include/linux/susfs.h').write_text(gki_h)
-Path('include/linux/susfs_def.h').write_text(d)
-Path('fs/susfs.c').write_text(c)
-print('Successfully backported GKI SUSFS v2.3.0 core onto 4.19.')
-PY
-
-        # 2. Apply robust inline hook updates for exec.c, open.c, stat.c (with full tolerance)
-        python3 -u - <<'PY'
-from pathlib import Path
-
-# ---- fs/exec.c : TIF_PROC_UMOUNTED -> TIF_PROC_NO_SU (Robust) ----
-p = Path('fs/exec.c')
-t = p.read_text()
-if 'susfs_is_current_proc_no_su()' in t:
-    print('fs/exec.c already uses susfs_is_current_proc_no_su', flush=True)
-elif 'susfs_is_current_proc_umounted()' in t:
-    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
-    p.write_text(t)
-    print('rewrote fs/exec.c sucompat early-out to susfs_is_current_proc_no_su', flush=True)
-else:
-    print('[*] Notice: fs/exec.c does not contain traditional susfs proc check, skipping.')
-
-# ---- fs/open.c : getname_flags + filename_lookup + filename** ----
-p = Path('fs/open.c')
-t = p.read_text()
-if 'filename_lookup' not in t:
-    old_open_proto = """extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
-            int *flags);"""
-    new_open_proto = """extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
-            int *flags);"""
-    if old_open_proto in t:
-        t = t.replace(old_open_proto, new_open_proto)
-    
-    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
-    p.write_text(t)
-    print('updated fs/open.c access handlers', flush=True)
-else:
-    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
-    p.write_text(t)
-
-# ---- fs/stat.c : same split ----
-p = Path('fs/stat.c')
-t = p.read_text()
-if '#include "internal.h"' not in t:
-    if '#include <linux/syscalls.h>' in t:
-        t = t.replace('#include <linux/syscalls.h>',
-                      '#include <linux/syscalls.h>\n#include "internal.h"', 1)
-    else:
-        t = '#include "internal.h"\n' + t
-
-t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
-p.write_text(t)
-print('updated fs/stat.c status handlers', flush=True)
-
-print('hook rewrite verified successfully with fallback tolerance', flush=True)
-PY
-
-        # 3. Align ReSukiSU sucompat handlers
-        python3 -u - <<'PY'
-from pathlib import Path
-candidates = ['KernelSU/kernel/feature/sucompat.c', 'drivers/kernelsu/feature/sucompat.c', 'KernelSU/kernel/sucompat.c']
-suc = next((Path(f) for f in candidates if Path(f).exists()), None)
-if not suc:
-    found = list(Path('.').rglob('sucompat.c'))
-    suc = found[0] if found else None
-
-if suc and suc.exists():
-    t = suc.read_text()
-    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
-    t = t.replace('susfs_set_current_proc_umounted()', 'susfs_set_current_proc_no_su()')
-    suc.write_text(t)
-    print('Aligned ReSukiSU sucompat to SUSFS v2.3.0 successfully.')
-PY
-    fi
 fi
 
 # ==========================================
@@ -495,6 +303,7 @@ build_target() {
     
     local OUT_DIR="${KERNEL_DIR}/out_${OS_TYPE}"
     
+    # Make options need to be available globally for functions like olddefconfig inside scripts/config calls
     MAKE_OPTS=(
         -j"$(nproc)"
         O="${OUT_DIR}"
@@ -519,6 +328,7 @@ build_target() {
         echo "[*] Applying MIUI DTS patches..."
         cp -a "${DTS_SOURCE}" "${DTS_BACKUP}"
         
+        # Apply MIUI specific sed patches to dts
         sed -i 's/<154>/<1537>/g' ${DTS_SOURCE}/dsi-panel-j1s* || true
         sed -i 's/<154>/<1537>/g' ${DTS_SOURCE}/dsi-panel-j2* || true
         sed -i 's/<155>/<1544>/g' ${DTS_SOURCE}/dsi-panel-j3s-37-02-0a-dsc-video.dtsi || true
@@ -570,7 +380,11 @@ build_target() {
     echo "[*] Making defconfig: ${DEFCONFIG}..."
     make "${MAKE_OPTS[@]}" "${DEFCONFIG}"
 
-    # 1. Baseband-guard configuration
+    # ----------------------------------------------------
+    # Configuration tweaks
+    # ----------------------------------------------------
+    
+    # 1. Baseband-guard configuration (Always applied)
     echo "[*] Injecting Baseband-guard configuration..."
     scripts/config --file "${OUT_DIR}/.config" -e BBG
 
@@ -632,12 +446,17 @@ build_target() {
             -e REKERNEL_NETWORK
     fi
 
+    # We always need to re-evaluate dependencies because BBG and Droidspaces are injected
     echo "[*] Updating config (make olddefconfig)..."
     make "${MAKE_OPTS[@]}" olddefconfig
 
+    # ----------------------------------------------------
+    # Compilation
+    # ----------------------------------------------------
     echo "[*] Building kernel..."
     make "${MAKE_OPTS[@]}" 
 
+    # Restore DTS backup for MIUI
     if [ "$OS_TYPE" == "miui" ]; then
         echo "[*] Restoring DTS backups..."
         rm -rf "${DTS_SOURCE}"
