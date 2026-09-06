@@ -216,13 +216,26 @@ def must_replace(text, old, new, label):
         raise SystemExit(f'{label}: expected block not found')
     return text.replace(old, new, 1)
 
-# fs/exec.c
+# fs/exec.c (with robust fallback & multi-pattern support)
 p = Path('fs/exec.c')
 t = p.read_text()
-t = must_replace(t, 
-    """#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_umounted()))\n        goto orig_flow;\n""",
-    """#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;\n""",
-    'fs/exec.c early-out')
+replaced_exec = False
+if '#ifdef CONFIG_KSU_SUSFS' in t:
+    for old_pattern in [
+        "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_umounted()))\n        goto orig_flow;",
+        "#ifdef CONFIG_KSU_SUSFS\r\n    if (likely(susfs_is_current_proc_umounted()))\r\n        goto orig_flow;",
+        "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;",
+    ]:
+        if old_pattern in t:
+            t = t.replace(old_pattern, "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;", 1)
+            replaced_exec = True
+            break
+
+if not replaced_exec:
+    target_str = "int search_binary_handler(struct linux_binprm *bprm)"
+    if target_str in t:
+        replacement = target_str + "\n{\n#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;\n#endif"
+        t = t.replace(target_str, replacement, 1)
 p.write_text(t)
 
 # fs/open.c
@@ -629,18 +642,9 @@ build_target() {
     if [ "$ENABLE_KSU" -eq 1 ]; then
         echo "[*] Injecting KernelSU & SUSFS configurations..."
         scripts/config --file "${OUT_DIR}/.config" \
-           -e KSU \
-           -e THREAD_INFO_IN_TASK \
-           -e KSU_SUSFS \
-           -e KSU_SUSFS_SUS_PATH \
-           -e KSU_SUSFS_SUS_MOUNT \
-           -e KSU_SUSFS_SUS_KSTAT \
-           -e KSU_SUSFS_SPOOF_UNAME \
-           -e KSU_SUSFS_ENABLE_LOG \
-           -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-           -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-           -e KSU_SUSFS_OPEN_REDIRECT \
-           -e KSU_SUSFS_SUS_MAP 
+            -e KSU \
+            -e THREAD_INFO_IN_TASK \
+            -e KSU_SUSFS
     fi
 
     # 3. Droidspaces Non-GKI configurations
