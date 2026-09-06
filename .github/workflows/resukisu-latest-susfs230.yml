@@ -27,6 +27,7 @@ on:
       - '.github/scripts/adapt-susfs230.sh'
       - '.github/scripts/rewrite-susfs230-hooks.py'
       - '.github/scripts/adapt-resukisu-sucompat230.sh'
+      - '.github/scripts/adapt-resukisu-latest-setup.py'
 
 jobs:
   build-kernel:
@@ -73,6 +74,19 @@ jobs:
           grep -Fq 'filename_lookup(dfd, fname, lookup_flags, &path, NULL)' fs/open.c
           grep -Fq 'filename_lookup(dfd, fname, lookup_flags, &path, NULL)' fs/stat.c
 
+      - name: Use latest ReSukiSU main
+        run: |
+          RESUKISU_SHA=$(git ls-remote https://github.com/ReSukiSU/ReSukiSU.git refs/heads/main | awk '{print $1}')
+          if [ -z "$RESUKISU_SHA" ]; then
+            echo 'failed to resolve ReSukiSU main SHA'
+            exit 1
+          fi
+          echo "RESUKISU_SHA=$RESUKISU_SHA" >> "$GITHUB_ENV"
+          echo "Resolved ReSukiSU main: $RESUKISU_SHA"
+          python3 .github/scripts/adapt-resukisu-latest-setup.py "$RESUKISU_SHA"
+          echo 'KCFLAGS=-DMODULE_IMPORT_NS\(x\)= -DTWA_RESUME=1' >> "$GITHUB_ENV"
+          grep -nE 'ReSukiSU|adapt-resukisu|-d KPM' build_kernel.sh | head
+
       - name: Modify kernel version string (Remove cip/st extra suffix)
         run: |
           sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = -Ikun-KirinNova|' Makefile
@@ -98,9 +112,12 @@ jobs:
           DEVICE="${INPUT_DEVICE:-alioth}"
           TARGET_OS="${INPUT_TARGET_OS:-miui}"
           echo "Executing command: ./build_kernel.sh $DEVICE ksu $TARGET_OS"
+          echo "ReSukiSU SHA: ${RESUKISU_SHA:-unknown}"
+          echo "KCFLAGS=$KCFLAGS"
           ./build_kernel.sh "$DEVICE" ksu "$TARGET_OS"
           grep -Fq '#define SUSFS_VERSION "v2.3.0"' include/linux/susfs.h
-          echo 'resukisu_ref=script-builtin' >> adapt-susfs230-proof.txt
+          echo "resukisu_sha=${RESUKISU_SHA:-unknown}" >> adapt-susfs230-proof.txt
+          echo 'resukisu_ref=main-latest' >> adapt-susfs230-proof.txt
 
       - name: Upload artifacts
         if: always()
