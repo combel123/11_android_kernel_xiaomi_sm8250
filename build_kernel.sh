@@ -72,253 +72,6 @@ echo "[*] Setting up ccache in $CCACHE_DIR..."
 mkdir -p "$CCACHE_DIR"
 
 # ==========================================
-# SUSFS v2.3.0 Adaptation for Linux 4.19
-# ==========================================
-adapt_susfs_v230() {
-    echo "==========================================="
-    echo " [*] Adapting SUSFS v2.3.0 for Linux 4.19"
-    echo "==========================================="
-    
-    echo '===== [1/3] Backport official GKI SUSFS v2.3.0 core onto Linux 4.19 ====='
-    test -f include/linux/susfs.h
-    test -f include/linux/susfs_def.h
-    test -f fs/susfs.c
-
-    GKI_BASE='https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android12-5.10/kernel_patches'
-    mkdir -p .susfs23-upstream
-    curl -fLSs "$GKI_BASE/fs/susfs.c" -o .susfs23-upstream/susfs.c
-    curl -fLSs "$GKI_BASE/include/linux/susfs.h" -o .susfs23-upstream/susfs.h
-    curl -fLSs "$GKI_BASE/include/linux/susfs_def.h" -o .susfs23-upstream/susfs_def.h
-    grep -Fq '#define SUSFS_VERSION "v2.3.0"' .susfs23-upstream/susfs.h
-    grep -Fq '#define TIF_PROC_NO_SU 34' .susfs23-upstream/susfs_def.h
-
-    python3 -u - <<'PY'
-from pathlib import Path
-
-up = Path('.susfs23-upstream')
-gki_c = (up / 'susfs.c').read_text()
-gki_h = (up / 'susfs.h').read_text()
-gki_d = (up / 'susfs_def.h').read_text()
-old_c = Path('fs/susfs.c').read_text()
-
-if '#define SUSFS_VERSION "v2.3.0"' not in gki_h:
-    raise SystemExit('upstream susfs.h is not v2.3.0')
-
-old_start = old_c.find('static SUSFS_DECL_FSNOTIFY_OPS(susfs_handle_sdcard_inode_event)')
-old_end = old_c.find('static int susfs_sdcard_monitor_fn')
-if old_start < 0 or old_end < 0:
-    raise SystemExit('cannot extract 4.19 fsnotify compatibility block')
-
-c = gki_c.replace('i_mapping->flags', 'i_state')
-d = gki_d.replace('inode->i_mapping->flags', 'inode->i_state')
-d = d.replace('i_mapping->flags', 'i_state')
-d = d.replace(
-    "inode->i_mapping->flags => A 'unsigned long' type storing flag 'AS_FLAGS_",
-    "inode->i_state => A 'unsigned long' type storing flag 'AS_FLAGS_",
-)
-
-if '#include <linux/version.h>' not in d:
-    if '#include <linux/bits.h>' in d:
-        d = d.replace('#include <linux/bits.h>', '#include <linux/bits.h>\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
-    else:
-        d = d.replace('#define KSU_SUSFS_DEF_H', '#define KSU_SUSFS_DEF_H\n\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
-
-if 'SUSFS_DECL_FSNOTIFY_OPS' not in d:
-    helper = r'''
-/* 4.19 / non-GKI fsnotify compatibility */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
-typedef const struct qstr *susfs_fname_t;
-#define susfs_fname_len(f) ((f)->len)
-#define susfs_fname_arg(f) ((f)->name)
-#else
-typedef const unsigned char *susfs_fname_t;
-#define susfs_fname_len(f) (strlen(f))
-#define susfs_fname_arg(f) (f)
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name) \
-int name(struct fsnotify_mark *mark, u32 mask, struct inode *inode, \
-struct inode *dir, const struct qstr *file_name, u32 cookie)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name) \
-int name(struct fsnotify_group *group, struct inode *inode, u32 mask, \
-const void *data, int data_type, susfs_fname_t file_name, \
-u32 cookie, struct fsnotify_iter_info *iter_info)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-#define SUSFS_DECL_FSNOTIFY_OPS(name) \
-int name(struct fsnotify_group *group, struct inode *inode, \
-struct fsnotify_mark *inode_mark, \
-struct fsnotify_mark *vfsmount_mark, u32 mask, \
-const void *data, int data_type, susfs_fname_t file_name, \
-u32 cookie, struct fsnotify_iter_info *iter_info)
-#else
-#define SUSFS_DECL_FSNOTIFY_OPS(name) \
-int name(struct fsnotify_group *group, struct inode *inode, \
-struct fsnotify_mark *inode_mark, \
-struct fsnotify_mark *vfsmount_mark, u32 mask, void *data, \
-int data_type, susfs_fname_t file_name, u32 cookie)
-#endif
-'''
-    d = d.replace('#endif // #ifndef KSU_SUSFS_DEF_H', helper + '\n#endif // #ifndef KSU_SUSFS_DEF_H')
-
-d = d.replace(
-    '''static inline bool susfs_is_current_proc_umounted_app(void) {
-    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
-            current_uid().val >= 10000);
-}''',
-    '''static inline bool susfs_is_current_proc_umounted_app(void) {
-    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-            __kuid_val(current_uid()) >= 10000);
-#else
-            current_uid().val >= 10000);
-#endif
-}'''
-)
-
-g_start = c.find('static int susfs_handle_sdcard_inode_event')
-g_end = c.find('static int susfs_sdcard_monitor_fn')
-c = c[:g_start] + old_c[old_start:old_end] + c[g_end:]
-
-if 'int susfs_open_redirect_spoof_show_map_vma(' not in c:
-    wrap = '''
-#ifdef CONFIG_KSU_SUSFS
-int susfs_open_redirect_spoof_show_map_vma(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char *spoofed_name)
-{
-    char *name = NULL;
-    int ret;
-
-    if (!spoofed_name)
-        return 0;
-    ret = susfs_open_redirect_spoof_show_map_vma_srcu(inode, out_ino, out_dev, &name);
-    if (ret && name)
-        strscpy(spoofed_name, name, SUSFS_MAX_LEN_PATHNAME);
-    return ret;
-}
-#endif
-'''
-    c = c.replace('void susfs_start_sdcard_monitor_fn(void)', wrap + '\nvoid susfs_start_sdcard_monitor_fn(void)', 1)
-
-Path('include/linux/susfs.h').write_text(gki_h)
-Path('include/linux/susfs_def.h').write_text(d)
-Path('fs/susfs.c').write_text(c)
-print('[PASS] Overlaid GKI v2.3.0 core on 4.19', flush=True)
-PY
-
-
-    echo '===== [2/3] Rewrite 4.19 inline hooks (exec.c, open.c, stat.c) ====='
-    python3 -u - <<'PY'
-from pathlib import Path
-
-def must_replace(text, old, new, label):
-    if old not in text:
-        raise SystemExit(f'{label}: expected block not found')
-    return text.replace(old, new, 1)
-
-# fs/exec.c (with robust fallback & multi-pattern support)
-p = Path('fs/exec.c')
-t = p.read_text()
-replaced_exec = False
-if '#ifdef CONFIG_KSU_SUSFS' in t:
-    for old_pattern in [
-        "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_umounted()))\n        goto orig_flow;",
-        "#ifdef CONFIG_KSU_SUSFS\r\n    if (likely(susfs_is_current_proc_umounted()))\r\n        goto orig_flow;",
-        "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;",
-    ]:
-        if old_pattern in t:
-            t = t.replace(old_pattern, "#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;", 1)
-            replaced_exec = True
-            break
-
-if not replaced_exec:
-    target_str = "int search_binary_handler(struct linux_binprm *bprm)"
-    if target_str in t:
-        replacement = target_str + "\n{\n#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_flow;\n#endif"
-        t = t.replace(target_str, replacement, 1)
-p.write_text(t)
-
-# fs/open.c
-p = Path('fs/open.c')
-t = p.read_text()
-t = must_replace(t,
-    """extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n            int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)\n{\n    const struct cred *old_cred;\n    struct cred *override_cred;\n    struct path path;\n    struct inode *inode;\n    struct vfsmount *mnt;\n    int res;\n    unsigned int lookup_flags = LOOKUP_FOLLOW;\n\n#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_umounted()))\n        goto orig_flow;\n    if (static_branch_likely(&ksu_su_compat_enabled))\n        if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val))) {\n            ksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n    }\n\norig_flow:\n#endif""",
-    """extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,\n            int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)\n{\n    const struct cred *old_cred;\n    struct cred *override_cred;\n    struct path path;\n    struct inode *inode;\n    struct vfsmount *mnt;\n    int res;\n    unsigned int lookup_flags = LOOKUP_FOLLOW;\n#ifdef CONFIG_KSU_SUSFS\n    struct filename *fname = NULL;\n#endif""",
-    'fs/open.c proto')
-
-t = must_replace(t,
-    """retry:\n    res = user_path_at(dfd, filename, lookup_flags, &path);\n    if (res)\n        goto out;""",
-    """retry:\n#ifdef CONFIG_KSU_SUSFS\n    fname = getname_flags(filename, lookup_flags, NULL);\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_faccessat;\n    if (static_branch_likely(&ksu_su_compat_enabled)) {\n        if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))\n            ksu_handle_faccessat(&dfd, &fname, &mode, NULL);\n    }\norig_faccessat:\n    res = filename_lookup(dfd, fname, lookup_flags, &path, NULL);\n#else\n    res = user_path_at(dfd, filename, lookup_flags, &path);\n#endif\n    if (res)\n        goto out;""",
-    'fs/open.c lookup')
-p.write_text(t)
-
-# fs/stat.c
-p = Path('fs/stat.c')
-t = p.read_text()
-if '#include "internal.h"' not in t:
-    t = t.replace('#include <linux/syscalls.h>', '#include <linux/syscalls.h>\n#include "internal.h"', 1)
-
-t = must_replace(t,
-    """extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\nint vfs_statx(int dfd, const char __user *filename, int flags,\n          struct kstat *stat, u32 request_mask)\n{\n    struct path path;\n    int error = -EINVAL;\n    unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;\n\n#ifdef CONFIG_KSU_SUSFS\n    if (likely(susfs_is_current_proc_umounted()))\n        goto orig_flow;\n    if (static_branch_likely(&ksu_su_compat_enabled)) {\n        if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))\n            ksu_handle_stat(&dfd, &filename, &flags);\n    }\norig_flow:\n#endif""",
-    """extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);\n#endif\n\nint vfs_statx(int dfd, const char __user *filename, int flags,\n          struct kstat *stat, u32 request_mask)\n{\n    struct path path;\n    int error = -EINVAL;\n    unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;\n#ifdef CONFIG_KSU_SUSFS\n    struct filename *fname = NULL;\n#endif""",
-    'fs/stat.c proto')
-
-t = must_replace(t,
-    """retry:\n    error = user_path_at(dfd, filename, lookup_flags, &path);\n    if (error)\n        goto out;""",
-    """retry:\n#ifdef CONFIG_KSU_SUSFS\n    fname = getname_flags(filename, lookup_flags, NULL);\n    if (likely(susfs_is_current_proc_no_su()))\n        goto orig_statx;\n    if (static_branch_likely(&ksu_su_compat_enabled)) {\n        if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))\n            ksu_handle_stat(&dfd, &fname, &flags);\n    }\norig_statx:\n    error = filename_lookup(dfd, fname, lookup_flags, &path, NULL);\n#else\n    error = user_path_at(dfd, filename, lookup_flags, &path);\n#endif\n    if (error)\n        goto out;""",
-    'fs/stat.c lookup')
-p.write_text(t)
-print('[PASS] Hook rewrites completed', flush=True)
-PY
-
-
-    echo '===== [3/3] Align ReSukiSU sucompat handlers with SUSFS 2.3 ====='
-    CANDIDATES=(KernelSU/kernel/feature/sucompat.c drivers/kernelsu/feature/sucompat.c KernelSU/kernel/sucompat.c)
-    HDR_CANDIDATES=(KernelSU/kernel/feature/sucompat.h drivers/kernelsu/feature/sucompat.h KernelSU/kernel/sucompat.h)
-    SUC=
-    for f in "${CANDIDATES[@]}"; do [[ -f "$f" ]] && SUC="$f" && break; done
-    [[ -n "$SUC" ]] || SUC=$(find . -path './.git' -prune -o -name 'sucompat.c' -print | head -n1)
-    HDR=
-    for f in "${HDR_CANDIDATES[@]}"; do [[ -f "$f" ]] && HDR="$f" && break; done
-    [[ -n "$HDR" ]] || HDR=$(dirname "$SUC")/sucompat.h
-    echo "Using sucompat: $SUC, header: $HDR"
-
-    python3 -u - "$SUC" "$HDR" <<'PY'
-from pathlib import Path
-import sys
-
-suc, hdr = Path(sys.argv[1]), Path(sys.argv[2])
-t = suc.read_text()
-
-# umounted -> no_su
-t = t.replace(
-    """#ifdef CONFIG_KSU_SUSFS\n            if (!susfs_is_current_proc_umounted())\n                susfs_set_current_proc_umounted();\n#endif""",
-    """#ifdef CONFIG_KSU_SUSFS\n            if (!susfs_is_current_proc_no_su())\n                susfs_set_current_proc_no_su();\n#endif"""
-)
-
-# drop 6.1 gate for stat/faccessat
-gate = '#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && defined(CONFIG_KSU_SUSFS)'
-if gate in t:
-    t = t.replace(gate, '#if defined(CONFIG_KSU_SUSFS)')
-
-# static branch key wrapper for 4.19 bool compatibility
-unguarded = '    if (!static_branch_unlikely(&ksu_su_compat_enabled)) {\n        return 0;\n    }'
-guarded = '#ifdef KSU_COMPAT_USE_STATIC_KEY\n    if (!static_branch_unlikely(&ksu_su_compat_enabled)) {\n        return 0;\n    }\n#else\n    if (!ksu_su_compat_enabled) {\n        return 0;\n    }\n#endif'
-if unguarded in t:
-    t = t.replace(unguarded, guarded)
-
-if '#include <linux/fs.h>' not in t:
-    t = t.replace('#include <linux/susfs_def.h>', '#include <linux/susfs_def.h>\n#include <linux/fs.h>\n#include <linux/err.h>', 1)
-
-suc.write_text(t)
-print('[PASS] ReSukiSU sucompat aligned', flush=True)
-PY
-
-    echo '[SUCCESS] All SUSFS 2.3.0 adaptations and hook alignments applied successfully!'
-    echo "==========================================="
-}
-
-# ==========================================
 # Droidspaces Constants & Functions
 # ==========================================
 DROIDSPACES_VERSION="${DROIDSPACES_VERSION:-v6.4.5}"
@@ -460,7 +213,7 @@ configure_droidspaces_non_gki() {
         -e NF_CONNTRACK_IPV4 \
         -e NF_NAT_IPV4 \
         -e IP_NF_NAT \
-        -e USER_NS \
+        -d USER_NS \
         -d ANDROID_PARANOID_NETWORK
 
     # Resolve dependencies now
@@ -489,7 +242,7 @@ configure_droidspaces_non_gki() {
 }
 
 # ==========================================
-# KernelSU Setup
+# KernelSU Setup & SUSFS v2.3.0 Adaptation
 # ==========================================
 if [ "$ENABLE_KSU" -eq 1 ]; then
     echo "==========================================="
@@ -499,8 +252,180 @@ if [ "$ENABLE_KSU" -eq 1 ]; then
     curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
     echo "[+] KernelSU setup finished."
 
-    # Execute SUSFS v2.3.0 adaptation right after KSU setup
-    adapt_susfs_v230
+    if [ -f include/linux/susfs.h ]; then
+        echo "=========================================================================="
+        echo " [*] Backporting official GKI SUSFS v2.3.0 onto Linux 4.19 i_state + hooks"
+        echo "=========================================================================="
+        
+        GKI_BASE='https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android12-5.10/kernel_patches'
+        mkdir -p "$KERNEL_DIR/.susfs23-upstream"
+        curl -fLSs "$GKI_BASE/fs/susfs.c" -o "$KERNEL_DIR/.susfs23-upstream/susfs.c"
+        curl -fLSs "$GKI_BASE/include/linux/susfs.h" -o "$KERNEL_DIR/.susfs23-upstream/susfs.h"
+        curl -fLSs "$GKI_BASE/include/linux/susfs_def.h" -o "$KERNEL_DIR/.susfs23-upstream/susfs_def.h"
+
+        python3 -u - <<'PY'
+from pathlib import Path
+import os
+
+ws = Path(os.environ.get('GITHUB_WORKSPACE', '.'))
+up = ws / '.susfs23-upstream'
+gki_c = (up / 'susfs.c').read_text()
+gki_h = (up / 'susfs.h').read_text()
+gki_d = (up / 'susfs_def.h').read_text()
+old_c = Path('fs/susfs.c').read_text()
+
+old_start = old_c.find('static SUSFS_DECL_FSNOTIFY_OPS(susfs_handle_sdcard_inode_event)')
+old_end = old_c.find('static int susfs_sdcard_monitor_fn')
+
+c = gki_c.replace('i_mapping->flags', 'i_state')
+d = gki_d.replace('inode->i_mapping->flags', 'inode->i_state').replace('i_mapping->flags', 'i_state')
+d = d.replace(
+    "inode->i_mapping->flags => A 'unsigned long' type storing flag 'AS_FLAGS_",
+    "inode->i_state => A 'unsigned long' type storing flag 'AS_FLAGS_",
+)
+
+if '#include <linux/version.h>' not in d:
+    if '#include <linux/bits.h>' in d:
+        d = d.replace('#include <linux/bits.h>', '#include <linux/bits.h>\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
+    else:
+        d = d.replace('#define KSU_SUSFS_DEF_H', '#define KSU_SUSFS_DEF_H\n\n#include <linux/version.h>\n#include <linux/cred.h>', 1)
+
+if 'SUSFS_DECL_FSNOTIFY_OPS' not in d:
+    helper = r'''
+/* 4.19 / non-GKI fsnotify compatibility */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+typedef const struct qstr *susfs_fname_t;
+#define susfs_fname_len(f) ((f)->len)
+#define susfs_fname_arg(f) ((f)->name)
+#else
+typedef const unsigned char *susfs_fname_t;
+#define susfs_fname_len(f) (strlen(f))
+#define susfs_fname_arg(f) (f)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
+int name(struct fsnotify_mark *mark, u32 mask, struct inode *inode,    \
+struct inode *dir, const struct qstr *file_name, u32 cookie)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
+#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
+int name(struct fsnotify_group *group, struct inode *inode, u32 mask,  \
+const void *data, int data_type, susfs_fname_t file_name,       \
+u32 cookie, struct fsnotify_iter_info *iter_info)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
+int name(struct fsnotify_group *group, struct inode *inode,            \
+struct fsnotify_mark *inode_mark,                              \
+struct fsnotify_mark *vfsmount_mark, u32 mask,                 \
+const void *data, int data_type, susfs_fname_t file_name,       \
+u32 cookie, struct fsnotify_iter_info *iter_info)
+#else
+#define SUSFS_DECL_FSNOTIFY_OPS(name)                                          \
+int name(struct fsnotify_group *group, struct inode *inode,            \
+struct fsnotify_mark *inode_mark,                              \
+struct fsnotify_mark *vfsmount_mark, u32 mask, void *data,    \
+int data_type, susfs_fname_t file_name, u32 cookie)
+#endif
+'''
+    d = d.replace('#endif // #ifndef KSU_SUSFS_DEF_H', helper + '\n#endif // #ifndef KSU_SUSFS_DEF_H')
+
+d = d.replace(
+    '''static inline bool susfs_is_current_proc_umounted_app(void) {
+    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
+            current_uid().val >= 10000);
+}''',
+    '''static inline bool susfs_is_current_proc_umounted_app(void) {
+    return (likely(test_thread_flag(TIF_PROC_UMOUNTED)) &&
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+            __kuid_val(current_uid()) >= 10000);
+#else
+            current_uid().val >= 10000);
+#endif
+}'''
+)
+
+g_start = c.find('static int susfs_handle_sdcard_inode_event')
+g_end = c.find('static int susfs_sdcard_monitor_fn')
+if g_start >= 0 and g_end >= 0 and old_start >= 0 and old_end >= 0:
+    c = c[:g_start] + old_c[old_start:old_end] + c[g_end:]
+
+if 'int susfs_open_redirect_spoof_show_map_vma(' not in c:
+    wrap = '''
+#ifdef CONFIG_KSU_SUSFS
+int susfs_open_redirect_spoof_show_map_vma(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char *spoofed_name)
+{
+    char *name = NULL;
+    int ret;
+
+    if (!spoofed_name)
+        return 0;
+    ret = susfs_open_redirect_spoof_show_map_vma_srcu(inode, out_ino, out_dev, &name);
+    if (ret && name)
+        strscpy(spoofed_name, name, SUSFS_MAX_LEN_PATHNAME);
+    return ret;
+}
+#endif
+'''
+    c = c.replace('void susfs_start_sdcard_monitor_fn(void)', wrap + '\nvoid susfs_start_sdcard_monitor_fn(void)', 1)
+
+Path('include/linux/susfs.h').write_text(gki_h)
+Path('include/linux/susfs_def.h').write_text(d)
+Path('fs/susfs.c').write_text(c)
+print('Successfully backported GKI SUSFS v2.3.0 core onto 4.19.')
+PY
+
+        # Rewrite 4.19 inline hooks for SUSFS 2.3 logic
+        python3 -u - <<'PY'
+from pathlib import Path
+
+def must_replace(text, old, new):
+    if old not in text:
+        return text
+    return text.replace(old, new, 1)
+
+# fs/exec.c
+p = Path('fs/exec.c')
+if p.exists():
+    t = p.read_text()
+    t = must_replace(t, 'susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
+    p.write_text(t)
+
+# fs/open.c
+p = Path('fs/open.c')
+if p.exists():
+    t = p.read_text()
+    t = t.replace('extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);',
+                  'extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *flags);')
+    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
+    p.write_text(t)
+
+# fs/stat.c
+p = Path('fs/stat.c')
+if p.exists():
+    t = p.read_text()
+    t = t.replace('extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);',
+                  'extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);')
+    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
+    p.write_text(t)
+PY
+
+        # Align ReSukiSU sucompat handlers
+        python3 -u - <<'PY'
+from pathlib import Path
+candidates = ['KernelSU/kernel/feature/sucompat.c', 'drivers/kernelsu/feature/sucompat.c', 'KernelSU/kernel/sucompat.c']
+suc = next((Path(f) for f in candidates if Path(f).exists()), None)
+if not suc:
+    found = list(Path('.').rglob('sucompat.c'))
+    suc = found[0] if found else None
+
+if suc and suc.exists():
+    t = suc.read_text()
+    t = t.replace('susfs_is_current_proc_umounted()', 'susfs_is_current_proc_no_su()')
+    t = t.replace('susfs_set_current_proc_umounted()', 'susfs_set_current_proc_no_su()')
+    suc.write_text(t)
+    print('Aligned ReSukiSU sucompat to SUSFS v2.3.0 successfully.')
+PY
+    fi
 fi
 
 # ==========================================
@@ -638,13 +563,22 @@ build_target() {
     echo "[*] Injecting Baseband-guard configuration..."
     scripts/config --file "${OUT_DIR}/.config" -e BBG
 
-    # 2. KernelSU & SUSFS configurations
+    # 2. KernelSU configurations
     if [ "$ENABLE_KSU" -eq 1 ]; then
         echo "[*] Injecting KernelSU & SUSFS configurations..."
         scripts/config --file "${OUT_DIR}/.config" \
-            -e KSU \
-            -e THREAD_INFO_IN_TASK \
-            -e KSU_SUSFS
+           -e KSU \
+           -e THREAD_INFO_IN_TASK \
+           -e KSU_SUSFS \
+           -e KSU_SUSFS_SUS_PATH \
+           -e KSU_SUSFS_SUS_MOUNT \
+           -e KSU_SUSFS_SUS_KSTAT \
+           -e KSU_SUSFS_SPOOF_UNAME \
+           -e KSU_SUSFS_ENABLE_LOG \
+           -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+           -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+           -e KSU_SUSFS_OPEN_REDIRECT \
+           -e KSU_SUSFS_SUS_MAP 
     fi
 
     # 3. Droidspaces Non-GKI configurations
@@ -664,7 +598,7 @@ build_target() {
             -e PACKAGE_RUNTIME_INFO \
             -e BINDER_OPT \
             -e KPERFEVENTS \
-            -d PERF_HUMANTASK \
+            -e PERF_HUMANTASK \
             -d LTO_CLANG \
             -e LTO_NONE \
             -d SHADOW_CALL_STACK \
