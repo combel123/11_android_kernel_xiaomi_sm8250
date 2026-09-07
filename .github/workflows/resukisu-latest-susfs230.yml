@@ -6,10 +6,10 @@ on:
       device:
         description: 'Target Device Code'
         required: true
-        default: 'alioth'
+        default: 'umi'
         type: choice
         options:
-          - alioth
+          - umi
       target_os:
         description: 'Target OS'
         required: true
@@ -31,7 +31,7 @@ on:
 
 jobs:
   build-kernel:
-    name: ReSukiSU latest + SUSFS 2.3.0 (${{ github.event.inputs.device || 'alioth' }})
+    name: ReSukiSU latest + SUSFS 2.3.0 (${{ github.event.inputs.device || 'umi' }})
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -89,7 +89,7 @@ jobs:
 
       - name: Modify kernel version string (Remove cip/st extra suffix)
         run: |
-          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = -Ikun-KirinNova|' Makefile
+          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = |' Makefile
           
           find arch/arm64/configs -maxdepth 1 -type f -name "*defconfig" | while read file
           do
@@ -109,7 +109,7 @@ jobs:
           INPUT_TARGET_OS: ${{ github.event.inputs.target_os }}
         run: |
           chmod +x build_kernel.sh
-          DEVICE="${INPUT_DEVICE:-alioth}"
+          DEVICE="${INPUT_DEVICE:-umi}"
           TARGET_OS="${INPUT_TARGET_OS:-miui}"
           echo "Executing command: ./build_kernel.sh $DEVICE ksu $TARGET_OS"
           echo "ReSukiSU SHA: ${RESUKISU_SHA:-unknown}"
@@ -123,7 +123,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: APT-ReSukiSU-latest-SUSFS230-${{ github.event.inputs.device || 'alioth' }}-${{ github.run_number }}
+          name: APT-ReSukiSU-latest-SUSFS230-${{ github.event.inputs.device || 'umi' }}-${{ github.run_number }}
           path: |
             APTKernel_*.zip
             adapt-susfs230.log
