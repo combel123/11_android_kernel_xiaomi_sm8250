@@ -3,17 +3,17 @@ name: Build Kernel
 on:
   push:
     branches:
-      - android17-aptusitu
+      - umi-new-aptusitu17
   workflow_dispatch:
     inputs:
       device:
         description: 'Target Device Code (设备代号)'
         required: true
-        default: 'alioth'
+        default: 'umi'
         type: choice
         options:
-          - alioth
-          - lmi
+          - umi
+          - munch
       ksu:
         description: 'Enable KernelSU (ReSukiSU)'
         required: true
@@ -46,7 +46,7 @@ env:
 
 jobs:
   build-kernel:
-    name: Build ${{ github.event.inputs.device || 'alioth' }} | KSU:${{ github.event.inputs.ksu || true }} | OS:${{ github.event.inputs.target_os || 'miui' }}
+    name: Build ${{ github.event.inputs.device || 'umi' }} | KSU:${{ github.event.inputs.ksu || true }} | OS:${{ github.event.inputs.target_os || 'miui' }}
     runs-on: ubuntu-latest
 
     permissions:
@@ -88,9 +88,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.device || 'alioth' }}-${{ github.sha }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.device || 'umi' }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.device || 'alioth' }}-
+            ${{ runner.os }}-kernel-ccache-${{ github.event.inputs.device || 'umi' }}-
             ${{ runner.os }}-kernel-ccache-
 
       - name: Configure ccache & Print Pre-Build Stats
@@ -102,7 +102,7 @@ jobs:
 
       - name: Modify kernel version string (Remove cip/st extra suffix)
         run: |
-          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = -Ikun-KirinNova|' Makefile
+          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = |' Makefile
             
           find arch/arm64/configs -maxdepth 1 -type f -name "*defconfig" | while read -r file; do
             sed -i '/CONFIG_LOCALVERSION_AUTO/d' "$file"
@@ -122,7 +122,7 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_EXEC=$(which ccache)
             
-          DEVICE="${{ github.event.inputs.device || 'alioth' }}"
+          DEVICE="${{ github.event.inputs.device || 'umi' }}"
           KSU="${{ github.event.inputs.ksu || 'true' }}"
           TARGET_OS="${{ github.event.inputs.target_os || 'miui' }}"
             
@@ -142,7 +142,7 @@ jobs:
       - name: Upload Flashable ZIP (Artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: DEBUG_APTKernel-${{ github.event.inputs.device || 'alioth' }}-${{ github.event.inputs.target_os || 'miui' }}-${{ github.run_id }}
+          name: DEBUG_APTKernel-${{ github.event.inputs.device || 'umi' }}-${{ github.event.inputs.target_os || 'miui' }}-${{ github.run_id }}
           path: "*APTKernel_*.zip"
           compression-level: 0
 
@@ -151,11 +151,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: "*APTKernel_*.zip"
-          tag_name: kernel-${{ github.event.inputs.device || 'alioth' }}-${{ github.run_id }}
-          name: "Kernel Build for ${{ github.event.inputs.device || 'alioth' }} (${{ github.event.inputs.target_os || 'miui' }})"
+          tag_name: kernel-${{ github.event.inputs.device || 'umi' }}-${{ github.run_id }}
+          name: "Kernel Build for ${{ github.event.inputs.device || 'umi' }} (${{ github.event.inputs.target_os || 'miui' }})"
           body: |
             Automatic kernel build.
-            - **Device:** ${{ github.event.inputs.device || 'alioth' }}
+            - **Device:** ${{ github.event.inputs.device || 'umi' }}
             - **KernelSU:** ${{ github.event.inputs.ksu || 'true' }}
             - **Target OS:** ${{ github.event.inputs.target_os || 'miui' }}
           draft: false
