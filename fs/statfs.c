@@ -74,32 +74,44 @@ static int statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf)
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
 extern int susfs_sus_kstat_spoof_vfs_statfs(struct inode *inode, struct kstatfs *buf, bool *is_fuse);
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-extern struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *vfsmnt);
-#endif //#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-static int susfs_statfs_by_dentry(struct dentry *dentry, struct kstatfs *buf, bool *is_fuse)
+int statfs_by_dentry_wrapper(struct dentry *dentry, struct kstatfs *buf)
+{
+	return statfs_by_dentry(dentry, buf);
+}
+
+int calculate_f_flags_wrapper(struct vfsmount *mnt)
+{
+	return calculate_f_flags(mnt);
+}
+
+static int susfs_statfs_by_dentry(struct dentry *dentry, struct vfsmount *mnt, struct kstatfs *buf, bool *is_fuse)
 {
 	int retval;
 
-	if (!dentry->d_sb->s_op->statfs)
-		return -ENOSYS;
-
-	memset(buf, 0, sizeof(*buf));
 	retval = security_sb_statfs(dentry);
 	if (retval)
 		return retval;
-	if (susfs_sus_kstat_spoof_vfs_statfs(d_backing_inode(dentry), buf, is_fuse))
-		goto orig_flow;
+
+	if (!susfs_sus_kstat_spoof_vfs_statfs(d_backing_inode(dentry), buf, is_fuse)) {
+		if (buf->f_frsize == 0)
+			buf->f_frsize = buf->f_bsize;
+		return retval;
+	}
+
 	retval = dentry->d_sb->s_op->statfs(dentry, buf);
-orig_flow:
-	if (retval == 0 && buf->f_frsize == 0)
-		buf->f_frsize = buf->f_bsize;
+	if (retval == 0) {
+		buf->f_flags = calculate_f_flags(mnt);
+		if (buf->f_frsize == 0)
+			buf->f_frsize = buf->f_bsize;
+	}
 	return retval;
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *vfsmnt);
+#endif //#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 int vfs_statfs(const struct path *path, struct kstatfs *buf)
 {
@@ -109,8 +121,9 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 		struct inode *inode = d_backing_inode(path->dentry);
 		bool is_fuse = false;
 		if (susfs_is_inode_sus_kstat(inode, &is_fuse)) {
-			error = susfs_statfs_by_dentry(path->dentry, buf, &is_fuse);
-			goto bypass_orig_flow;
+			// - here we do not call calculate_f_flags() here as buf->f_flags on the
+			//   sus_kstat path will be handled by susfs_statfs_by_dentry().
+			return susfs_statfs_by_dentry(path->dentry, path->mnt, buf, &is_fuse);
 		}
 	}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
@@ -123,8 +136,10 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 			dput(no_sus_vfsmnt->mnt_root);
 			mntput(no_sus_vfsmnt);
 			error = statfs_by_dentry(path->dentry, buf);
-			goto bypass_orig_flow;
-	}
+			if (!error)
+				buf->f_flags = calculate_f_flags(path->mnt);
+			return error;
+		}
 		error = statfs_by_dentry(no_sus_vfsmnt->mnt_root, buf);
 		if (!error)
 			buf->f_flags = calculate_f_flags(no_sus_vfsmnt);
@@ -135,9 +150,6 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 	error = statfs_by_dentry(path->dentry, buf);
-#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)
-bypass_orig_flow:
-#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)
 	if (!error)
 		buf->f_flags = calculate_f_flags(path->mnt);
 	return error;
@@ -252,8 +264,10 @@ SYSCALL_DEFINE3(statfs64, const char __user *, pathname, size_t, sz, struct stat
 {
 	struct kstatfs st;
 	int error;
+
 	if (sz != sizeof(*buf))
 		return -EINVAL;
+
 	error = user_statfs(pathname, &st);
 	if (!error)
 		error = do_statfs64(&st, buf);
