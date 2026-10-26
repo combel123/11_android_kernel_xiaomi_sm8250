@@ -9,9 +9,11 @@ on:
       device:
         description: 'Target Device Code (设备代号)'
         required: true
-        default: 'alioth'
+        default: 'umi'
         type: choice
         options:
+          - umi
+          - munch
           - alioth
           - lmi
       ksu:
@@ -102,7 +104,7 @@ jobs:
 
       - name: Modify kernel version string (Remove cip/st extra suffix)
         run: |
-          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = -Ikun-KirinNova|' Makefile
+          sed -i 's|^EXTRAVERSION =.*|EXTRAVERSION = |' Makefile
             
           find arch/arm64/configs -maxdepth 1 -type f -name "*defconfig" | while read -r file; do
             sed -i '/CONFIG_LOCALVERSION_AUTO/d' "$file"
